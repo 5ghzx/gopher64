@@ -7,14 +7,13 @@ pub fn init(device: &mut device::Device) {
 
     let title = std::ffi::CString::new("gopher64").unwrap();
 
-    let mut flags = sdl3_sys::video::SDL_WINDOW_VULKAN;
+    let mut flags = sdl3_sys::video::SDL_WINDOW_VULKAN
+        | sdl3_sys::video::SDL_WINDOW_RESIZABLE
+        | sdl3_sys::video::SDL_WINDOW_INPUT_FOCUS;
 
-    if device.ui.fullscreen {
+    if device.ui.video.fullscreen {
         flags |= sdl3_sys::video::SDL_WINDOW_FULLSCREEN;
-    } else {
-        flags |= sdl3_sys::video::SDL_WINDOW_RESIZABLE;
     }
-    flags |= sdl3_sys::video::SDL_WINDOW_INPUT_FOCUS;
 
     let window_width;
     let window_height;
@@ -33,13 +32,13 @@ pub fn init(device: &mut device::Device) {
         };
         window_height = 480;
     }
-    device.ui.window = unsafe {
+    device.ui.video.window = unsafe {
         sdl3_sys::video::SDL_CreateWindow(title.as_ptr(), window_width, window_height, flags)
     };
-    if device.ui.window.is_null() {
+    if device.ui.video.window.is_null() {
         panic!("Could not create window");
     }
-    if !unsafe { sdl3_sys::video::SDL_ShowWindow(device.ui.window) } {
+    if !unsafe { sdl3_sys::video::SDL_ShowWindow(device.ui.video.window) } {
         panic!("Could not show window");
     }
     unsafe { sdl3_sys::everything::SDL_HideCursor() };
@@ -54,23 +53,19 @@ pub fn init(device: &mut device::Device) {
         DPC_STATUS_REG: &mut device.rdp.regs_dpc[device::rdp::DPC_STATUS_REG as usize],
         PAL: device.cart.pal,
         widescreen: device.ui.config.video.widescreen,
+        fullscreen: device.ui.video.fullscreen,
+        integer_scaling: device.ui.config.video.integer_scaling,
+        upscale: device.ui.config.video.upscale,
+        crt: device.ui.config.video.crt,
     };
 
-    unsafe {
-        rdp_init(
-            device.ui.window as *mut std::ffi::c_void,
-            gfx_info,
-            device.ui.config.video.upscale,
-            device.ui.config.video.integer_scaling,
-            device.ui.fullscreen,
-        )
-    }
+    unsafe { rdp_init(device.ui.video.window as *mut std::ffi::c_void, gfx_info) }
 }
 
 pub fn close(ui: &ui::Ui) {
     unsafe {
         rdp_close();
-        sdl3_sys::video::SDL_DestroyWindow(ui.window);
+        sdl3_sys::video::SDL_DestroyWindow(ui.video.window);
     }
 }
 
@@ -98,9 +93,13 @@ pub fn load_state(device: &mut device::Device) {
         DPC_STATUS_REG: &mut device.rdp.regs_dpc[device::rdp::DPC_STATUS_REG as usize],
         PAL: device.cart.pal,
         widescreen: device.ui.config.video.widescreen,
+        fullscreen: device.ui.video.fullscreen,
+        integer_scaling: device.ui.config.video.integer_scaling,
+        upscale: device.ui.config.video.upscale,
+        crt: device.ui.config.video.crt,
     };
     unsafe {
-        rdp_new_processor(gfx_info, device.ui.config.video.upscale);
+        rdp_new_processor(gfx_info);
     }
 }
 

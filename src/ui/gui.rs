@@ -18,6 +18,7 @@ pub struct GopherEguiApp {
     integer_scaling: bool,
     fullscreen: bool,
     widescreen: bool,
+    crt: bool,
     overclock: bool,
     emulate_vru: bool,
     dinput: bool,
@@ -44,6 +45,7 @@ struct SaveConfig {
     integer_scaling: bool,
     fullscreen: bool,
     widescreen: bool,
+    crt: bool,
     emulate_vru: bool,
     overclock: bool,
 }
@@ -59,10 +61,10 @@ fn get_input_profiles(config: &ui::config::Config) -> Vec<String> {
 pub fn get_controller_names(game_ui: &ui::Ui) -> Vec<String> {
     let mut controllers: Vec<String> = vec![];
 
-    for offset in 0..game_ui.num_joysticks as isize {
+    for offset in 0..game_ui.input.num_joysticks as isize {
         let name = unsafe {
             std::ffi::CStr::from_ptr(sdl3_sys::joystick::SDL_GetJoystickNameForID(
-                *(game_ui.joysticks.offset(offset)),
+                *(game_ui.input.joysticks.offset(offset)),
             ))
         };
         controllers.push(name.to_string_lossy().to_string());
@@ -74,10 +76,10 @@ pub fn get_controller_names(game_ui: &ui::Ui) -> Vec<String> {
 pub fn get_controller_paths(game_ui: &ui::Ui) -> Vec<String> {
     let mut controller_paths: Vec<String> = vec![];
 
-    for offset in 0..game_ui.num_joysticks as isize {
+    for offset in 0..game_ui.input.num_joysticks as isize {
         let path = unsafe {
             std::ffi::CStr::from_ptr(sdl3_sys::joystick::SDL_GetJoystickPathForID(
-                *(game_ui.joysticks.offset(offset)),
+                *(game_ui.input.joysticks.offset(offset)),
             ))
             .to_string_lossy()
             .to_string()
@@ -121,6 +123,7 @@ impl GopherEguiApp {
             integer_scaling: config.video.integer_scaling,
             fullscreen: config.video.fullscreen,
             widescreen: config.video.widescreen,
+            crt: config.video.crt,
             emulate_vru: config.input.emulate_vru,
             overclock: config.emulation.overclock,
             show_vru_dialog: false,
@@ -159,6 +162,7 @@ fn save_config(
     config.video.integer_scaling = save_config_items.integer_scaling;
     config.video.fullscreen = save_config_items.fullscreen;
     config.video.widescreen = save_config_items.widescreen;
+    config.video.crt = save_config_items.crt;
     config.input.emulate_vru = save_config_items.emulate_vru;
 
     config.emulation.overclock = save_config_items.overclock;
@@ -175,6 +179,7 @@ impl Drop for GopherEguiApp {
             integer_scaling: self.integer_scaling,
             fullscreen: self.fullscreen,
             widescreen: self.widescreen,
+            crt: self.crt,
             emulate_vru: self.emulate_vru,
             overclock: self.overclock,
         };
@@ -222,44 +227,35 @@ fn configure_profile(app: &mut GopherEguiApp, ctx: &egui::Context) {
 }
 
 fn show_vru_dialog(app: &mut GopherEguiApp, ctx: &egui::Context) {
-    ctx.show_viewport_immediate(
-        egui::ViewportId::from_hash_of("vru_dialog"),
-        egui::ViewportBuilder::default()
-            .with_title("What would you like to say?")
-            .with_always_on_top(),
-        |ctx, class| {
-            assert!(
-                class == egui::ViewportClass::Immediate,
-                "This egui backend doesn't support multiple viewports"
-            );
-            egui::CentralPanel::default().show(ctx, |ui| {
-                egui::Grid::new("vru_words").show(ui, |ui| {
-                    for (i, v) in app.vru_word_list.iter().enumerate() {
-                        if i % 5 == 0 {
-                            ui.end_row();
-                        }
-                        if ui.button((*v).to_string()).clicked() {
-                            app.vru_word_notifier
-                                .as_ref()
-                                .unwrap()
-                                .try_send(v.clone())
-                                .unwrap();
-                            app.show_vru_dialog = false;
-                        }
-                    }
-                });
-            });
-
-            if ctx.input(|i| i.viewport().close_requested()) {
-                app.vru_word_notifier
-                    .as_ref()
-                    .unwrap()
-                    .try_send(String::from(""))
-                    .unwrap();
-                app.show_vru_dialog = false;
+    egui::CentralPanel::default().show(ctx, |ui| {
+        ui.label("What would you like to say?");
+        egui::Grid::new("vru_words").show(ui, |ui| {
+            for (i, v) in app.vru_word_list.iter().enumerate() {
+                if i % 5 == 0 {
+                    ui.end_row();
+                }
+                if ui.button((*v).to_string()).clicked() {
+                    app.vru_word_notifier
+                        .as_ref()
+                        .unwrap()
+                        .try_send(v.clone())
+                        .unwrap();
+                    app.show_vru_dialog = false;
+                }
             }
-        },
-    );
+        });
+
+        ui.add_space(16.0);
+
+        if ui.button("Close without saying anything").clicked() {
+            app.vru_word_notifier
+                .as_ref()
+                .unwrap()
+                .try_send(String::from(""))
+                .unwrap();
+            app.show_vru_dialog = false;
+        };
+    });
 }
 
 fn get_latest_version(app: &mut GopherEguiApp, ctx: &egui::Context) {
@@ -312,6 +308,7 @@ pub fn open_rom(app: &mut GopherEguiApp, ctx: &egui::Context, enable_overclock: 
     let integer_scaling = app.integer_scaling;
     let fullscreen = app.fullscreen;
     let widescreen = app.widescreen;
+    let crt = app.crt;
     let emulate_vru = app.emulate_vru;
     let overclock = app.overclock;
     let peer_addr;
@@ -408,6 +405,7 @@ pub fn open_rom(app: &mut GopherEguiApp, ctx: &egui::Context, enable_overclock: 
                     integer_scaling,
                     fullscreen,
                     widescreen,
+                    crt,
                     emulate_vru,
                     overclock,
                 };
@@ -475,6 +473,11 @@ pub fn open_rom(app: &mut GopherEguiApp, ctx: &egui::Context, enable_overclock: 
 
 impl eframe::App for GopherEguiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.show_vru_dialog {
+            show_vru_dialog(self, ctx);
+            return;
+        }
+
         if self.netplay.create {
             gui_netplay::netplay_create(self, ctx);
         }
@@ -539,7 +542,7 @@ impl eframe::App for GopherEguiApp {
                     }
                 });
 
-            ui.add_space(32.0);
+            ui.add_space(16.0);
             ui.label("Controller Config:");
             egui::Grid::new("controller_config").show(ui, |ui| {
                 ui.label("Port");
@@ -603,7 +606,7 @@ impl eframe::App for GopherEguiApp {
                     ui.end_row();
                 }
             });
-            ui.add_space(32.0);
+            ui.add_space(16.0);
             let upscale_values = [1, 2, 4];
             let mut slider_value = match self.upscale {
                 1 => 0,
@@ -625,6 +628,7 @@ impl eframe::App for GopherEguiApp {
             ui.checkbox(&mut self.integer_scaling, "Integer Scaling");
             ui.checkbox(&mut self.fullscreen, "Fullscreen (Esc closes game)");
             ui.checkbox(&mut self.widescreen, "Widescreen (stretch)");
+            ui.checkbox(&mut self.crt, "Apply CRT shader");
 
             ui.add_space(16.0);
             ui.checkbox(&mut self.overclock, "Overclock N64 CPU (may cause bugs)");
@@ -652,10 +656,6 @@ impl eframe::App for GopherEguiApp {
                 self.show_vru_dialog = true;
                 self.vru_word_list = result.unwrap();
             }
-        }
-
-        if self.show_vru_dialog {
-            show_vru_dialog(self, ctx);
         }
 
         get_latest_version(self, ctx);
