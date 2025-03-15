@@ -1,7 +1,22 @@
 use crate::{device, netplay, ui};
 use eframe::egui;
+use std::path::PathBuf; 
+use scan_dir::ScanDir;
+
+
 
 pub mod gui_netplay;
+
+#[derive(PartialEq, Clone, Copy)]
+enum Tab {
+    Game,
+    Controllers,
+    Graphics,
+    Advanced,
+    About
+}
+
+
 
 pub struct GopherEguiApp {
     dirs: ui::Dirs,
@@ -18,7 +33,6 @@ pub struct GopherEguiApp {
     integer_scaling: bool,
     fullscreen: bool,
     widescreen: bool,
-    crt: bool,
     overclock: bool,
     emulate_vru: bool,
     dinput: bool,
@@ -29,12 +43,20 @@ pub struct GopherEguiApp {
     latest_version: Option<semver::Version>,
     update_receiver: Option<tokio::sync::mpsc::Receiver<GithubData>>,
     netplay: gui_netplay::GuiNetplay,
+    current_tab: Tab,
+    library_dir: Option<std::path::PathBuf>,
+    ROMs_list: Vec<PathBuf>,
 }
+
+
+
 
 #[derive(serde::Deserialize)]
 struct GithubData {
     tag_name: String,
 }
+
+
 
 struct SaveConfig {
     selected_controller: [i32; 4],
@@ -45,10 +67,12 @@ struct SaveConfig {
     integer_scaling: bool,
     fullscreen: bool,
     widescreen: bool,
-    crt: bool,
     emulate_vru: bool,
     overclock: bool,
+    library_dir: Option<std::path::PathBuf>,
 }
+
+
 
 fn get_input_profiles(config: &ui::config::Config) -> Vec<String> {
     let mut profiles = vec![];
@@ -58,13 +82,15 @@ fn get_input_profiles(config: &ui::config::Config) -> Vec<String> {
     profiles
 }
 
+
+
 pub fn get_controller_names(game_ui: &ui::Ui) -> Vec<String> {
     let mut controllers: Vec<String> = vec![];
 
-    for offset in 0..game_ui.input.num_joysticks as isize {
+    for offset in 0..game_ui.num_joysticks as isize {
         let name = unsafe {
             std::ffi::CStr::from_ptr(sdl3_sys::joystick::SDL_GetJoystickNameForID(
-                *(game_ui.input.joysticks.offset(offset)),
+                *(game_ui.joysticks.offset(offset)),
             ))
         };
         controllers.push(name.to_string_lossy().to_string());
@@ -73,13 +99,15 @@ pub fn get_controller_names(game_ui: &ui::Ui) -> Vec<String> {
     controllers
 }
 
+
+
 pub fn get_controller_paths(game_ui: &ui::Ui) -> Vec<String> {
     let mut controller_paths: Vec<String> = vec![];
 
-    for offset in 0..game_ui.input.num_joysticks as isize {
+    for offset in 0..game_ui.num_joysticks as isize {
         let path = unsafe {
             std::ffi::CStr::from_ptr(sdl3_sys::joystick::SDL_GetJoystickPathForID(
-                *(game_ui.input.joysticks.offset(offset)),
+                *(game_ui.joysticks.offset(offset)),
             ))
             .to_string_lossy()
             .to_string()
@@ -89,6 +117,8 @@ pub fn get_controller_paths(game_ui: &ui::Ui) -> Vec<String> {
 
     controller_paths
 }
+
+
 
 impl GopherEguiApp {
     pub fn new(
@@ -116,6 +146,7 @@ impl GopherEguiApp {
             selected_profile: config.input.input_profile_binding.clone(),
             selected_controller,
             controller_names,
+            ROMs_list: Vec::new(),
             input_profiles: get_input_profiles(&config),
             controller_enabled: config.input.controller_enabled,
             transfer_pak: config.input.transfer_pak,
@@ -123,7 +154,6 @@ impl GopherEguiApp {
             integer_scaling: config.video.integer_scaling,
             fullscreen: config.video.fullscreen,
             widescreen: config.video.widescreen,
-            crt: config.video.crt,
             emulate_vru: config.input.emulate_vru,
             overclock: config.emulation.overclock,
             show_vru_dialog: false,
@@ -136,9 +166,13 @@ impl GopherEguiApp {
             vru_word_list: Vec::new(),
             netplay: Default::default(),
             dirs: ui::get_dirs(),
+            current_tab: Tab::Game,
+            library_dir: config.paths.library_dir,
         }
     }
 }
+
+
 
 fn save_config(
     config: &mut ui::config::Config,
@@ -162,11 +196,13 @@ fn save_config(
     config.video.integer_scaling = save_config_items.integer_scaling;
     config.video.fullscreen = save_config_items.fullscreen;
     config.video.widescreen = save_config_items.widescreen;
-    config.video.crt = save_config_items.crt;
     config.input.emulate_vru = save_config_items.emulate_vru;
 
     config.emulation.overclock = save_config_items.overclock;
+    config.paths.library_dir = save_config_items.library_dir;
 }
+
+
 
 impl Drop for GopherEguiApp {
     fn drop(&mut self) {
@@ -179,9 +215,9 @@ impl Drop for GopherEguiApp {
             integer_scaling: self.integer_scaling,
             fullscreen: self.fullscreen,
             widescreen: self.widescreen,
-            crt: self.crt,
             emulate_vru: self.emulate_vru,
             overclock: self.overclock,
+            library_dir: self.library_dir.clone(),
         };
         let mut config = ui::config::Config::new();
         save_config(
@@ -191,6 +227,8 @@ impl Drop for GopherEguiApp {
         );
     }
 }
+
+
 
 fn configure_profile(app: &mut GopherEguiApp, ctx: &egui::Context) {
     egui::Window::new("Configure Input Profile")
@@ -226,37 +264,50 @@ fn configure_profile(app: &mut GopherEguiApp, ctx: &egui::Context) {
         });
 }
 
+
+
 fn show_vru_dialog(app: &mut GopherEguiApp, ctx: &egui::Context) {
-    egui::CentralPanel::default().show(ctx, |ui| {
-        ui.label("What would you like to say?");
-        egui::Grid::new("vru_words").show(ui, |ui| {
-            for (i, v) in app.vru_word_list.iter().enumerate() {
-                if i % 5 == 0 {
-                    ui.end_row();
-                }
-                if ui.button((*v).to_string()).clicked() {
-                    app.vru_word_notifier
-                        .as_ref()
-                        .unwrap()
-                        .try_send(v.clone())
-                        .unwrap();
-                    app.show_vru_dialog = false;
-                }
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of("vru_dialog"),
+        egui::ViewportBuilder::default()
+            .with_title("What would you like to say?")
+            .with_always_on_top(),
+        |ctx, class| {
+            assert!(
+                class == egui::ViewportClass::Immediate,
+                "This egui backend doesn't support multiple viewports"
+            );
+            egui::CentralPanel::default().show(ctx, |ui| {
+                egui::Grid::new("vru_words").show(ui, |ui| {
+                    for (i, v) in app.vru_word_list.iter().enumerate() {
+                        if i % 5 == 0 {
+                            ui.end_row();
+                        }
+                        if ui.button((*v).to_string()).clicked() {
+                            app.vru_word_notifier
+                                .as_ref()
+                                .unwrap()
+                                .try_send(v.clone())
+                                .unwrap();
+                            app.show_vru_dialog = false;
+                        }
+                    }
+                });
+            });
+
+            if ctx.input(|i| i.viewport().close_requested()) {
+                app.vru_word_notifier
+                    .as_ref()
+                    .unwrap()
+                    .try_send(String::from(""))
+                    .unwrap();
+                app.show_vru_dialog = false;
             }
-        });
-
-        ui.add_space(16.0);
-
-        if ui.button("Close without saying anything").clicked() {
-            app.vru_word_notifier
-                .as_ref()
-                .unwrap()
-                .try_send(String::from(""))
-                .unwrap();
-            app.show_vru_dialog = false;
-        };
-    });
+        },
+    );
 }
+
+
 
 fn get_latest_version(app: &mut GopherEguiApp, ctx: &egui::Context) {
     if app.update_receiver.is_none() {
@@ -297,7 +348,9 @@ fn get_latest_version(app: &mut GopherEguiApp, ctx: &egui::Context) {
     }
 }
 
-pub fn open_rom(app: &mut GopherEguiApp, ctx: &egui::Context, enable_overclock: bool) {
+
+
+pub fn open_rom(app: &mut GopherEguiApp, ctx: &egui::Context, enable_overclock: bool, from_library: bool) {
     let netplay;
 
     let selected_controller = app.selected_controller;
@@ -308,7 +361,6 @@ pub fn open_rom(app: &mut GopherEguiApp, ctx: &egui::Context, enable_overclock: 
     let integer_scaling = app.integer_scaling;
     let fullscreen = app.fullscreen;
     let widescreen = app.widescreen;
-    let crt = app.crt;
     let emulate_vru = app.emulate_vru;
     let overclock = app.overclock;
     let peer_addr;
@@ -355,11 +407,15 @@ pub fn open_rom(app: &mut GopherEguiApp, ctx: &egui::Context, enable_overclock: 
     let mut select_gb_ram = [None, None, None, None];
 
     if !netplay {
+        if !from_library {
         select_rom = Some(
             rfd::AsyncFileDialog::new()
                 .set_title("Select ROM")
                 .pick_file(),
         );
+        } else{
+        select_rom = Some(chosen_game)
+        }
         for i in 0..4 {
             if transfer_pak[i] {
                 select_gb_rom[i] = Some(
@@ -405,9 +461,9 @@ pub fn open_rom(app: &mut GopherEguiApp, ctx: &egui::Context, enable_overclock: 
                     integer_scaling,
                     fullscreen,
                     widescreen,
-                    crt,
                     emulate_vru,
                     overclock,
+                    library_dir,
                 };
 
                 if file.is_some() || netplay {
@@ -471,13 +527,10 @@ pub fn open_rom(app: &mut GopherEguiApp, ctx: &egui::Context, enable_overclock: 
     });
 }
 
+
+
 impl eframe::App for GopherEguiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if self.show_vru_dialog {
-            show_vru_dialog(self, ctx);
-            return;
-        }
-
         if self.netplay.create {
             gui_netplay::netplay_create(self, ctx);
         }
@@ -502,152 +555,231 @@ impl eframe::App for GopherEguiApp {
             if self.configure_profile {
                 ui.disable()
             }
-            egui::Grid::new("button_grid")
-                .min_col_width(200.0)
-                .show(ui, |ui| {
-                    if ui.button("Open ROM").clicked() {
-                        open_rom(self, ctx, self.overclock);
-                    }
-                    if ui.button("Netplay: Create Session").clicked()
-                        && !self.dirs.cache_dir.join("game_running").exists()
-                    {
-                        self.netplay.create = true;
-                    }
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.current_tab, Tab::Game, "Game");
+                ui.selectable_value(&mut self.current_tab, Tab::Controllers, "Controllers");
+                ui.selectable_value(&mut self.current_tab, Tab::Graphics, "Graphics");
+                ui.selectable_value(&mut self.current_tab, Tab::Advanced, "Advanced");
+                ui.selectable_value(&mut self.current_tab, Tab::About, "About");
+            });
+            
+            ui.separator();
+            
+            match self.current_tab {
+                Tab::Game => {
+                    ui.vertical(|ui| {
+                    
+                        egui::Grid::new("game_grid").min_col_width(200.0).show(ui, |ui| {
 
-                    if ui.button("Open Saves Folder").clicked() {
-                        let command = if cfg!(target_os = "windows") {
-                            "explorer"
-                        } else if cfg!(target_os = "linux") {
-                            "xdg-open"
-                        } else {
-                            panic!("Unsupported platform");
-                        };
-                        let _ = std::process::Command::new(command)
-                            .arg(self.dirs.data_dir.join("saves"))
-                            .spawn();
-                    }
+                                if ui.button("Open ROM").clicked() {
+                                    open_rom(self, ctx, self.overclock, false);
+                                }
 
-                    ui.end_row();
+                                if ui.button("Netplay: Create Session").clicked() 
+                                    && !self.dirs.cache_dir.join("game_running").exists() {
+                                    self.netplay.create = true;
+                                }
+                        
+                                if ui.button("Open Saves Folder").clicked() {
+                                    let command = if cfg!(target_os = "windows") {
+                                        "explorer"
+                                    } else if cfg!(target_os = "linux") {
+                                        "xdg-open"
+                                    } else {
+                                        panic!("Unsupported platform");
+                                    };
+                                    let _ = std::process::Command::new(command)
+                                        .arg(self.dirs.data_dir.join("saves"))
+                                        .spawn();
+                                }
+                                
+                                if ui.button("Netplay: Join Session").clicked()
+                                    && !self.dirs.cache_dir.join("game_running").exists() {
+                                    self.netplay.join = true;
+                                }
 
+                                if ui.button("Scan ROMs Folder").clicked() {
+                                    let dialog = rfd::AsyncFileDialog::new()
+                                        .set_title("Select ROMs Folder")
+                                        .pick_folder();
+                                    
+                                    let ctx_clone = ctx.clone();
+                                    let app_ptr = std::sync::Arc::new(std::sync::Mutex::new(self));
+                                    
+                                    tokio::spawn(async move {
+                                        if let Some(folder) = dialog.await {
+                                            let folder_path = folder.path().to_path_buf();
+                                            
+                                            // Scan the selected folder for ROM files
+                                            let roms_list: Vec<PathBuf> = ScanDir::files()
+                                                .walk(folder_path.clone(), |iter| {
+                                                    iter.filter(|&(_, ref name)| 
+                                                        name.ends_with(".z64") || 
+                                                        name.ends_with(".v64") || 
+                                                        name.ends_with(".n64") || 
+                                                        name.ends_with(".zip") || 
+                                                        name.ends_with(".7z"))
+                                                        .map(|(ref entry, _)| entry.path())
+                                                        .collect()
+                                                })
+                                                .unwrap_or_default();
+                                            
+                                            // Update app state with the new folder and ROMs
+                                            if let Ok(mut app) = app_ptr.lock() {
+                                                app.library_dir = Some(folder_path);
+                                                app.ROMs_list = roms_list;
+                                            }
+                                            
+                                            ctx_clone.request_repaint();
+                                        }
+                                    });
+                                    
+                                }
+                        });
+
+                        ui.separator();
+
+                        egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            
+                            if self.ROMs_list.is_empty() {
+                                ui.label("No ROMs found. Select a ROMs folder first.");
+                            } else {
+                                for rom_path in &self.ROMs_list {
+                                    let file_name = rom_path.file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("Unknown ROM");
+                                        
+                                    if ui.button(file_name).clicked() {
+                                        self.open_rom(ctx, self.overclock, true, rom_path.clone());
+                                    }
+                                }
+                            }
+                        });
+                    });
+                },
+                Tab::Controllers => {
+                    // Controller config grid and profile button
                     if ui.button("Configure Input Profile").clicked()
-                        && !self.dirs.cache_dir.join("game_running").exists()
-                    {
+                        && !self.dirs.cache_dir.join("game_running").exists() {
                         self.configure_profile = true;
                     }
+                    
+                    ui.add_space(16.0);
+                    ui.label("Controller Config:");
+                    egui::Grid::new("controller_config").show(ui, |ui| {
+                        ui.label("Port");
+                        ui.label("Enabled");
+                        ui.label("Emulate VRU");
+                        ui.label("Transfer Pak");
+                        ui.label("Profile");
+                        ui.label("Controller");
+                        ui.end_row();
+                        for i in 0..4 {
+                            ui.label(format!("{}", i + 1));
+                            ui.centered_and_justified(|ui| {
+                                ui.checkbox(&mut self.controller_enabled[i], "");
+                            });
+                            let mut vru = false;
+                            ui.centered_and_justified(|ui| {
+                                if i < 3 {
+                                    ui.add_enabled(false, egui::Checkbox::new(&mut vru, ""));
+                                } else {
+                                    ui.add_enabled(true, egui::Checkbox::new(&mut self.emulate_vru, ""));
+                                }
+                            });
 
-                    if ui.button("Netplay: Join Session").clicked()
-                        && !self.dirs.cache_dir.join("game_running").exists()
-                    {
-                        self.netplay.join = true;
-                    }
-                });
+                            ui.centered_and_justified(|ui| {
+                                ui.checkbox(&mut self.transfer_pak[i], "");
+                            });
 
-            ui.add_space(16.0);
-            ui.label("Controller Config:");
-            egui::Grid::new("controller_config").show(ui, |ui| {
-                ui.label("Port");
-                ui.label("Enabled");
-                ui.label("Emulate VRU");
-                ui.label("Transfer Pak");
-                ui.label("Profile");
-                ui.label("Controller");
-                ui.end_row();
-                for i in 0..4 {
-                    ui.label(format!("{}", i + 1));
-                    ui.centered_and_justified(|ui| {
-                        ui.checkbox(&mut self.controller_enabled[i], "");
-                    });
-                    let mut vru = false;
-                    ui.centered_and_justified(|ui| {
-                        if i < 3 {
-                            ui.add_enabled(false, egui::Checkbox::new(&mut vru, ""));
-                        } else {
-                            ui.add_enabled(true, egui::Checkbox::new(&mut self.emulate_vru, ""));
+                            egui::ComboBox::from_id_salt(format!("profile-combo-{}", i))
+                                .selected_text(self.selected_profile[i].clone())
+                                .show_ui(ui, |ui| {
+                                    for j in 0..self.input_profiles.len() {
+                                        ui.selectable_value(
+                                            &mut self.selected_profile[i],
+                                            self.input_profiles[j].clone(),
+                                            self.input_profiles[j].clone(),
+                                        );
+                                    }
+                                });
+
+                            let controller_text = if self.selected_controller[i] == -1 {
+                                "None".to_string()
+                            } else {
+                                self.controller_names[self.selected_controller[i] as usize].clone()
+                            };
+                            egui::ComboBox::from_id_salt(format!("controller-combo-{}", i))
+                                .selected_text(controller_text)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.selected_controller[i],
+                                        -1,
+                                        "None".to_string(),
+                                    );
+                                    for j in 0..self.controller_names.len() {
+                                        ui.selectable_value(
+                                            &mut self.selected_controller[i],
+                                            j as i32,
+                                            self.controller_names[j].clone(),
+                                        );
+                                    }
+                                });
+                            ui.end_row();
                         }
                     });
-
-                    ui.centered_and_justified(|ui| {
-                        ui.checkbox(&mut self.transfer_pak[i], "");
-                    });
-
-                    egui::ComboBox::from_id_salt(format!("profile-combo-{}", i))
-                        .selected_text(self.selected_profile[i].clone())
-                        .show_ui(ui, |ui| {
-                            for j in 0..self.input_profiles.len() {
-                                ui.selectable_value(
-                                    &mut self.selected_profile[i],
-                                    self.input_profiles[j].clone(),
-                                    self.input_profiles[j].clone(),
-                                );
-                            }
-                        });
-
-                    let controller_text = if self.selected_controller[i] == -1 {
-                        "None".to_string()
-                    } else {
-                        self.controller_names[self.selected_controller[i] as usize].clone()
+                },
+                Tab::Graphics => {
+                    // Resolution and display options
+                    let upscale_values = [1, 2, 4];
+                    let mut slider_value = match self.upscale {
+                        1 => 0,
+                        2 => 1,
+                        4 => 2,
+                        _ => 0,
                     };
-                    egui::ComboBox::from_id_salt(format!("controller-combo-{}", i))
-                        .selected_text(controller_text)
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(
-                                &mut self.selected_controller[i],
-                                -1,
-                                "None".to_string(),
+                    let display_text = format!("{}x Resolution", upscale_values[slider_value]);
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut slider_value, 0..=2)
+                                .show_value(false)
+                                .text(display_text),
+                        )
+                        .changed()
+                    {
+                        self.upscale = upscale_values[slider_value];
+                    };
+                    ui.checkbox(&mut self.integer_scaling, "Integer Scaling");
+                    ui.checkbox(&mut self.fullscreen, "Fullscreen (Esc closes game)");
+                    ui.checkbox(&mut self.widescreen, "Widescreen (stretch)");
+                },
+                Tab::Advanced => {
+                    // Overclock options
+                    ui.checkbox(&mut self.overclock, "Overclock N64 CPU (may cause bugs)");
+                    
+                    // Additional advanced settings could go here
+                },
+                Tab::About => {
+                    // Links and version info
+                    ui.hyperlink_to("Wiki", "https://github.com/gopher64/gopher64/wiki");
+                    ui.hyperlink_to("Discord Server", "https://discord.gg/9RGXq8W8JQ");
+                    ui.add_space(16.0);
+                    
+                    ui.label(format!("Version: {}", env!("CARGO_PKG_VERSION")));
+                    if self.latest_version.is_some() {
+                        let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+                        if current_version < *self.latest_version.as_ref().unwrap() {
+                            ui.hyperlink_to(
+                                "New version available!",
+                                "https://github.com/gopher64/gopher64/releases/latest",
                             );
-                            for j in 0..self.controller_names.len() {
-                                ui.selectable_value(
-                                    &mut self.selected_controller[i],
-                                    j as i32,
-                                    self.controller_names[j].clone(),
-                                );
-                            }
-                        });
-                    ui.end_row();
-                }
-            });
-            ui.add_space(16.0);
-            let upscale_values = [1, 2, 4];
-            let mut slider_value = match self.upscale {
-                1 => 0,
-                2 => 1,
-                4 => 2,
-                _ => 0,
-            };
-            let display_text = format!("{}x Resolution", upscale_values[slider_value]);
-            if ui
-                .add(
-                    egui::Slider::new(&mut slider_value, 0..=2)
-                        .show_value(false)
-                        .text(display_text),
-                )
-                .changed()
-            {
-                self.upscale = upscale_values[slider_value];
-            };
-            ui.checkbox(&mut self.integer_scaling, "Integer Scaling");
-            ui.checkbox(&mut self.fullscreen, "Fullscreen (Esc closes game)");
-            ui.checkbox(&mut self.widescreen, "Widescreen (stretch)");
-            ui.checkbox(&mut self.crt, "Apply CRT shader");
-
-            ui.add_space(16.0);
-            ui.checkbox(&mut self.overclock, "Overclock N64 CPU (may cause bugs)");
-            ui.add_space(16.0);
-
-            ui.hyperlink_to("Wiki", "https://github.com/gopher64/gopher64/wiki");
-            ui.hyperlink_to("Discord Server", "https://discord.gg/9RGXq8W8JQ");
-            ui.add_space(16.0);
-
-            ui.label(format!("Version: {}", env!("CARGO_PKG_VERSION")));
-            if self.latest_version.is_some() {
-                let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
-                if current_version < *self.latest_version.as_ref().unwrap() {
-                    ui.hyperlink_to(
-                        "New version available!",
-                        "https://github.com/gopher64/gopher64/releases/latest",
-                    );
+                        }
+                    }
                 }
             }
+
         });
 
         if self.emulate_vru && self.vru_window_receiver.is_some() {
@@ -658,9 +790,15 @@ impl eframe::App for GopherEguiApp {
             }
         }
 
+        if self.show_vru_dialog {
+            show_vru_dialog(self, ctx);
+        }
+
         get_latest_version(self, ctx);
     }
 }
+
+
 
 fn add_fonts(ctx: &egui::Context) {
     ctx.add_font(eframe::epaint::text::FontInsert::new(

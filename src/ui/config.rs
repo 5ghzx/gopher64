@@ -1,9 +1,15 @@
 use crate::ui;
+use std::path::PathBuf;
 
 #[derive(Copy, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InputKeyButton {
     pub enabled: bool,
     pub id: i32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Paths {
+    pub library_dir: Option<PathBuf>,
 }
 
 #[derive(PartialEq, Copy, Clone, serde::Serialize, serde::Deserialize)]
@@ -60,6 +66,7 @@ pub struct Config {
     pub input: Input,
     pub video: Video,
     pub emulation: Emulation,
+    pub paths: Paths,
 }
 
 impl Drop for Config {
@@ -110,6 +117,7 @@ impl Config {
                 crt: false,
             },
             emulation: Emulation { overclock: false },
+            paths: Paths { library_dir: None },
         }
     }
 }
